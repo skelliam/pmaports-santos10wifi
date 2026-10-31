@@ -9,7 +9,7 @@ buildable:
 - Copied from pmaports commit `cfbc1de3c` lineage (HEAD at 2026-10-31); the shared gcc patches that were
   symlinks upstream are real files here.
 - Kernel source URL changed to [skelliam/android_kernel_samsung_santos10](https://github.com/skelliam/android_kernel_samsung_santos10)
-  (fork of santos10-dev, branch `pmos-santos10`, pinned commit `edec7f67`). The tarball sha512 is unchanged.
+  (fork of santos10-dev, branch `pmos-santos10`, pinned commit `6d56daec`, which is upstream `edec7f67` plus a fix for building arch/x86/boot with gcc >= 15).
 
 ## Use
 

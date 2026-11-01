@@ -1,0 +1,199 @@
+diff --git a/arch/x86/syscalls/syscall_32.tbl b/arch/x86/syscalls/syscall_32.tbl
+index 76af9b35495..e403e7aa9ad 100644
+--- a/arch/x86/syscalls/syscall_32.tbl
++++ b/arch/x86/syscalls/syscall_32.tbl
+@@ -357,3 +357,4 @@
+ 348	i386	process_vm_writev	sys_process_vm_writev		compat_sys_process_vm_writev
+ 354	i386	seccomp			sys_seccomp
+ 355	i386	getrandom		sys_getrandom
++356	i386	memfd_create		sys_memfd_create
+diff --git a/fs/fcntl.c b/fs/fcntl.c
+index 75e7c1f3a08..603cb1d792a 100644
+--- a/fs/fcntl.c
++++ b/fs/fcntl.c
+@@ -420,6 +420,10 @@ static long do_fcntl(int fd, unsigned int cmd, unsigned long arg,
+ 	case F_GETPIPE_SZ:
+ 		err = pipe_fcntl(filp, cmd, arg);
+ 		break;
++	case F_ADD_SEALS:
++	case F_GET_SEALS:
++		err = shmem_fcntl(filp, cmd, arg);
++		break;
+ 	default:
+ 		break;
+ 	}
+diff --git a/include/linux/fcntl.h b/include/linux/fcntl.h
+index f550f894ba1..5d40f4db446 100644
+--- a/include/linux/fcntl.h
++++ b/include/linux/fcntl.h
+@@ -3,6 +3,17 @@
+ 
+ #include <asm/fcntl.h>
+ 
++/*
++ * Set/Get seals (memfd_create backport, see mm/shmem.c)
++ */
++#define F_ADD_SEALS	(F_LINUX_SPECIFIC_BASE + 9)
++#define F_GET_SEALS	(F_LINUX_SPECIFIC_BASE + 10)
++
++#define F_SEAL_SEAL	0x0001	/* prevent further seals from being set */
++#define F_SEAL_SHRINK	0x0002	/* prevent file from shrinking */
++#define F_SEAL_GROW	0x0004	/* prevent file from growing */
++#define F_SEAL_WRITE	0x0008	/* prevent writes */
++
+ #define F_SETLEASE	(F_LINUX_SPECIFIC_BASE + 0)
+ #define F_GETLEASE	(F_LINUX_SPECIFIC_BASE + 1)
+ 
+diff --git a/include/linux/shmem_fs.h b/include/linux/shmem_fs.h
+index 79ab2555b3b..24202300a9f 100644
+--- a/include/linux/shmem_fs.h
++++ b/include/linux/shmem_fs.h
+@@ -19,6 +19,7 @@ struct shmem_inode_info {
+ 	struct shared_policy	policy;		/* NUMA memory alloc policy */
+ 	struct list_head	swaplist;	/* chain of maybes on swap */
+ 	struct list_head	xattr_list;	/* list of shmem_xattr */
++	unsigned int		seals;		/* memfd seals (F_SEAL_*), recorded only */
+ 	struct inode		vfs_inode;
+ };
+ 
+@@ -44,6 +45,14 @@ static inline struct shmem_inode_info *SHMEM_I(struct inode *inode)
+  */
+ extern int shmem_init(void);
+ extern int shmem_fill_super(struct super_block *sb, void *data, int silent);
++#ifdef CONFIG_SHMEM
++extern long shmem_fcntl(struct file *file, unsigned int cmd, unsigned long arg);
++#else
++static inline long shmem_fcntl(struct file *file, unsigned int cmd, unsigned long arg)
++{
++	return -EINVAL;
++}
++#endif
+ extern struct file *shmem_file_setup(const char *name,
+ 					loff_t size, unsigned long flags);
+ extern int shmem_zero_setup(struct vm_area_struct *);
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index bd9ef27c22e..9a82fdbe8b7 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -861,6 +861,7 @@ asmlinkage long sys_process_vm_writev(pid_t pid,
+ asmlinkage long sys_seccomp(unsigned int op, unsigned int flags,
+ 			    const char __user *uargs);
+ 
++asmlinkage long sys_memfd_create(const char __user *uname_ptr, unsigned int flags);
+ asmlinkage long sys_getrandom(char __user *buf, size_t count,
+ 			      unsigned int flags);
+ 
+diff --git a/mm/shmem.c b/mm/shmem.c
+index 2e4d10d534f..982be7e084c 100644
+--- a/mm/shmem.c
++++ b/mm/shmem.c
+@@ -27,6 +27,8 @@
+ #include <linux/mount.h>
+ #include <linux/pagemap.h>
+ #include <linux/file.h>
++#include <linux/fcntl.h>
++#include <linux/syscalls.h>
+ #include <linux/mm.h>
+ #include <linux/export.h>
+ #include <linux/swap.h>
+@@ -2744,6 +2746,100 @@ put_memory:
+ }
+ EXPORT_SYMBOL_GPL(shmem_file_setup);
+ 
++#ifdef CONFIG_SHMEM
++/*
++ * Backport of memfd_create() (Linux 3.17) for the vendor 3.4 kernel.
++ * Userspace (glibc/musl, glycin, Wayland, ...) needs it. Seals are recorded
++ * and reported by fcntl(F_ADD_SEALS/F_GET_SEALS) but not enforced.
++ */
++#define MFD_CLOEXEC		0x0001U
++#define MFD_ALLOW_SEALING	0x0002U
++#define MFD_NAME_PREFIX		"memfd:"
++#define MFD_NAME_PREFIX_LEN	(sizeof(MFD_NAME_PREFIX) - 1)
++#define MFD_NAME_MAX_LEN	(NAME_MAX - MFD_NAME_PREFIX_LEN)
++
++long shmem_fcntl(struct file *file, unsigned int cmd, unsigned long arg)
++{
++	struct shmem_inode_info *info;
++
++	if (file->f_op != &shmem_file_operations)
++		return -EINVAL;
++	info = SHMEM_I(file->f_path.dentry->d_inode);
++
++	switch (cmd) {
++	case F_GET_SEALS:
++		return info->seals;
++	case F_ADD_SEALS:
++		if (!(file->f_mode & FMODE_WRITE))
++			return -EPERM;
++		if (arg & ~(F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE))
++			return -EINVAL;
++		if (info->seals & F_SEAL_SEAL)
++			return -EPERM;
++		info->seals |= arg;
++		return 0;
++	}
++	return -EINVAL;
++}
++
++SYSCALL_DEFINE2(memfd_create, const char __user *, uname, unsigned int, flags)
++{
++	struct shmem_inode_info *info;
++	struct file *file;
++	int fd, error;
++	char *name;
++	long len;
++
++	if (flags & ~(MFD_CLOEXEC | MFD_ALLOW_SEALING))
++		return -EINVAL;
++
++	len = strnlen_user(uname, MFD_NAME_MAX_LEN + 1);
++	if (len <= 0)
++		return -EFAULT;
++	if (len > MFD_NAME_MAX_LEN + 1)
++		return -EINVAL;
++
++	name = kmalloc(len + MFD_NAME_PREFIX_LEN, GFP_KERNEL);
++	if (!name)
++		return -ENOMEM;
++
++	strcpy(name, MFD_NAME_PREFIX);
++	if (copy_from_user(&name[MFD_NAME_PREFIX_LEN], uname, len)) {
++		error = -EFAULT;
++		goto err_name;
++	}
++	/* terminating NUL is included in len; make sure of it */
++	name[len + MFD_NAME_PREFIX_LEN - 1] = '\0';
++
++	fd = get_unused_fd_flags((flags & MFD_CLOEXEC) ? O_CLOEXEC : 0);
++	if (fd < 0) {
++		error = fd;
++		goto err_name;
++	}
++
++	file = shmem_file_setup(name, 0, VM_NORESERVE);
++	if (IS_ERR(file)) {
++		error = PTR_ERR(file);
++		goto err_fd;
++	}
++	info = SHMEM_I(file->f_path.dentry->d_inode);
++	file->f_mode |= FMODE_LSEEK | FMODE_PREAD | FMODE_PWRITE;
++	file->f_flags |= O_RDWR | O_LARGEFILE;
++	if (!(flags & MFD_ALLOW_SEALING))
++		info->seals = F_SEAL_SEAL;
++
++	fd_install(fd, file);
++	kfree(name);
++	return fd;
++
++err_fd:
++	put_unused_fd(fd);
++err_name:
++	kfree(name);
++	return error;
++}
++#endif /* CONFIG_SHMEM */
++
+ void shmem_set_file(struct vm_area_struct *vma, struct file *file)
+ {
+ 	if (vma->vm_file)

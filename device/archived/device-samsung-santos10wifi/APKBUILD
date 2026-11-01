@@ -4,12 +4,12 @@ maintainer=""
 pkgname=device-samsung-santos10wifi
 pkgdesc="Samsung Galaxy Tab 3 10.1 Wi-Fi"
 pkgver=4
-pkgrel=3
+pkgrel=4
 url="https://postmarketos.org"
 license="MIT"
 arch="x86"
 options="!check !archcheck"
-triggers="$pkgname.trigger=/usr/sbin:/usr/lib/ssh"
+triggers="$pkgname.trigger=/usr/sbin:/usr/lib/ssh:/etc"
 depends="postmarketos-base linux-samsung-santos10wifi mkbootimg"
 makedepends="devicepkg-dev"
 subpackages="

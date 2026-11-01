@@ -1,0 +1,108 @@
+diff --git a/fs/proc/meminfo.c b/fs/proc/meminfo.c
+index 80e4645f799..ff4d78caa47 100644
+--- a/fs/proc/meminfo.c
++++ b/fs/proc/meminfo.c
+@@ -26,6 +26,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
+ 	unsigned long allowed;
+ 	struct vmalloc_info vmi;
+ 	long cached;
++	long available;
+ 	unsigned long pages[NR_LRU_LISTS];
+ 	int lru;
+ 
+@@ -44,6 +45,8 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
+ 	if (cached < 0)
+ 		cached = 0;
+ 
++	available = si_mem_available();
++
+ 	get_vmalloc_info(&vmi);
+ 
+ 	for (lru = LRU_BASE; lru < NR_LRU_LISTS; lru++)
+@@ -55,6 +58,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
+ 	seq_printf(m,
+ 		"MemTotal:       %8lu kB\n"
+ 		"MemFree:        %8lu kB\n"
++		"MemAvailable:   %8lu kB\n"
+ 		"Buffers:        %8lu kB\n"
+ 		"Cached:         %8lu kB\n"
+ 		"SwapCached:     %8lu kB\n"
+@@ -107,6 +111,7 @@ static int meminfo_proc_show(struct seq_file *m, void *v)
+ 		,
+ 		K(i.totalram),
+ 		K(i.freeram),
++		K(available),
+ 		K(i.bufferram),
+ 		K(cached),
+ 		K(total_swapcache_pages),
+diff --git a/include/linux/mm.h b/include/linux/mm.h
+index 36b47095c07..541286d1084 100644
+--- a/include/linux/mm.h
++++ b/include/linux/mm.h
+@@ -1348,6 +1348,7 @@ extern void mem_init(void);
+ extern void __init mmap_init(void);
+ extern void show_mem(unsigned int flags);
+ extern void si_meminfo(struct sysinfo * val);
++extern long si_mem_available(void);
+ extern void si_meminfo_node(struct sysinfo *val, int nid);
+ extern int after_bootmem;
+ 
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index d02983a7b01..03f497d8d71 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -2674,6 +2674,54 @@ static inline void show_node(struct zone *zone)
+ 		printk("Node %d ", zone_to_nid(zone));
+ }
+ 
++/*
++ * Backport of si_mem_available() (Linux 3.14): estimate of the memory available
++ * for starting new applications without swapping. Userspace (glycin, systemd,
++ * ...) reads MemAvailable from /proc/meminfo and misbehaves when it is missing.
++ */
++long si_mem_available(void)
++{
++	long available;
++	unsigned long pagecache;
++	unsigned long wmark_low = 0;
++	unsigned long pages[NR_LRU_LISTS];
++	struct zone *zone;
++	int lru;
++
++	for (lru = LRU_BASE; lru < NR_LRU_LISTS; lru++)
++		pages[lru] = global_page_state(NR_LRU_BASE + lru);
++
++	for_each_zone(zone)
++		wmark_low += zone->watermark[WMARK_LOW];
++
++	/*
++	 * Estimate the amount of memory available for userspace allocations,
++	 * without causing swapping.
++	 */
++	available = global_page_state(NR_FREE_PAGES) - totalreserve_pages;
++
++	/*
++	 * Not all the page cache can be freed, otherwise the system will
++	 * start swapping. Assume at least half of the page cache, or the
++	 * low watermark worth of cache, needs to stay.
++	 */
++	pagecache = pages[LRU_ACTIVE_FILE] + pages[LRU_INACTIVE_FILE];
++	pagecache -= min(pagecache / 2, wmark_low);
++	available += pagecache;
++
++	/*
++	 * Part of the reclaimable slab consists of items that are in use,
++	 * and cannot be freed. Cap this estimate at the low watermark.
++	 */
++	available += global_page_state(NR_SLAB_RECLAIMABLE) -
++		     min(global_page_state(NR_SLAB_RECLAIMABLE) / 2, wmark_low);
++
++	if (available < 0)
++		available = 0;
++	return available;
++}
++EXPORT_SYMBOL_GPL(si_mem_available);
++
+ void si_meminfo(struct sysinfo *val)
+ {
+ 	val->totalram = totalram_pages;

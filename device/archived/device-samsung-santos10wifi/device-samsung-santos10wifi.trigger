@@ -13,4 +13,11 @@ link() {
 link /usr/sbin/sshd.pam /usr/sbin/sshd
 link /usr/lib/ssh/sshd-session.pam /usr/lib/ssh/sshd-session
 link /usr/lib/ssh/sshd-auth.pam /usr/lib/ssh/sshd-auth
+
+# gdk-pixbuf >= 2.44 decodes images through glycin, which sandboxes loaders with
+# bubblewrap. That needs user namespaces, which kernel 3.4 does not have, so
+# every image load fails and the greeter aborts. Run the loaders unsandboxed.
+if [ -f /etc/environment ] && ! grep -q '^GLYCIN_DISABLE_SANDBOX=' /etc/environment; then
+	echo 'GLYCIN_DISABLE_SANDBOX=1' >> /etc/environment
+fi
 exit 0
